@@ -30,6 +30,12 @@ a {
 				</select>
 				<button id="connect" disabled="disabled">connect</button>
 				<button id="start" disabled="disabled">(re)start</button>
+				<select id="log-level" style="width: auto;">
+					<option value="0">DEBUG</option>
+					<option value="1" selected="selected">INFO</option>
+					<option value="2">WARN</option>
+					<option value="3">ERROR</option>
+				</select>
 			</div>
 			<div id="crsfstatus" style="text-align: center;"></div>
 			<canvas id="lcd" width="480" height="272" style="display:block; margin-left:auto; margin-right:auto;"></canvas>
@@ -39,7 +45,16 @@ a {
 				<div><img src="logotype.svg" style="padding:0.3em;"></div>
 				<div style="margin:auto;"><div>ELRS Buddy</div><div style="font-size:0.5em; font-weight:normal; text-align:right;">v1.0.4</div></div>
 			</div>
-			<div style="text-align: center;">
+			<div id="lua-info" style="color: white; text-align: center; margin-top: 1em;">
+				<div style="font-size: 0.9em; opacity: 0.8;">Current: <span id="lua-filename">elrsV3.lua</span></div>
+				<div id="lua-version" style="font-weight: bold; margin-top: 0.2em;">-- (no connection)</div>
+			</div>
+			<div style="text-align: center; margin-top: 1em; display: flex; flex-direction: column; gap: 0.5em; align-items: center;">
+				<button id="upload-btn" style="width: auto; padding: 0.5em 1em; cursor: pointer; border-radius: 4px; border: 1px solid white; background: rgba(255,255,255,0.1); color: white;">Upload Lua</button>
+				<input type="file" id="lua-upload" style="display: none;" accept=".lua">
+				<a id="download-link" href="elrsV3.lua" download="elrsV3.lua" style="font-size: 0.8em; color: white; opacity: 0.7; text-decoration: underline;">Download Current Lua</a>
+			</div>
+			<div style="text-align: center; margin-top: 2em;">
 				<a target="_blank" href="https://youtube.com/playlist?list=PL5blJzbVpLjFwGb_-_IBfnscjPwTEA98u">Introduction / Howto</a>
 			</div>
 		</div>
@@ -158,8 +173,8 @@ a {
 		return table.pack(f(...))
 	end
 	
-	function loadelrs ()
-		ELRS_LOAD = loadfile('elrsV3.lua')
+	function loadelrs (filename)
+		ELRS_LOAD = loadfile(filename or 'elrsV3.lua')
 		return ELRS_LOAD
 	end
 	
@@ -222,6 +237,7 @@ lcd = {
 		if (lcd.debug) console.log(`textAlign ${lcd.ctx.textAlign} font ${lcd.ctx.font}`);
 	},
 	'clear': function (color) {
+		llog('LCD:CLEAR', 0);
 		if (lcd.debug) console.log('clear');
 		lcd.ctx.reset();
 		lcd.lastpos = 0;
@@ -247,18 +263,21 @@ lcd = {
 		lcd.lastpos = x + w;
 	},
 	'drawRectangle': function (x, y, w, h, flags, t) {
+		llog(`LCD:DRAWRECT ${x},${y},${w},${h}`, 0);
 		lcd.strokeStyle(flags);
 		lcd.ctx.strokeRect(x, y, w, h);
 		lcd.lastpos = x + w;
 		if (lcd.debug) console.log(`drawRectangle ${flags}`);
 	},
 	'drawFilledRectangle': function (x, y, w, h, flags) {
+		llog(`LCD:DRAWFRECT ${x},${y},${w},${h}`, 0);
 		lcd.fillStyle(flags);
 		lcd.ctx.fillRect(x, y, w, h);
 		lcd.lastpos = x + w;
 		if (lcd.debug) console.log(`drawFilledRectangle ${flags}`);
 	},
 	'drawText': function (x, y, text, flags, inversColor) {
+		llog(`LCD:DRAWTEXT ${text}`, 0);
 		if (lcd.debug) console.log(`drawText ${flags} ${text}`);
 		lcd.textConfig(flags);
 		const tmetrics = lcd.ctx.measureText(text);
@@ -294,7 +313,8 @@ lcd = {
 		lcd.textConfig(flags);
 		const tmetrics = lcd.ctx.measureText(text);
 		const boundw = Math.round(tmetrics.actualBoundingBoxLeft + tmetrics.actualBoundingBoxRight);
-		return boundw;
+		const boundh = Math.round(tmetrics.actualBoundingBoxAscent + tmetrics.actualBoundingBoxDescent);
+		return [boundw, boundh || 22];
 	},
 	'getLastPos': function () {
 		return lcd.lastpos;
@@ -325,8 +345,10 @@ function try_tag (tag) {
 	window.lua.doStringSync(tag.innerHTML);
 };
 
-function llog (msg) {
-	console.log(msg);
+function llog (msg, level = 1) {
+	const currentLevel = parseInt(document.getElementById('log-level')?.value || 1);
+	if (level < currentLevel) return;
+	console.log(`[${level}] ${msg}`);
 }
 
 function portstr (info) {
@@ -346,6 +368,11 @@ function portstr (info) {
 }
 
 function loadpairedports (verbose=true) {
+	if (navigator.serial === undefined) {
+		llog('Browser does not support Web Serial API (e.g. Safari). Please use a Chrome-based browser.', 3);
+		pairbutton.disabled = true;
+		return;
+	}
 	navigator.serial.getPorts().then((ports) => {
 		let info;
 		let npairedport = null;
@@ -357,7 +384,7 @@ function loadpairedports (verbose=true) {
 				port: port,
 				info: str
 			};
-			if (verbose) llog(`device ${str} found`);
+			if (verbose) llog(`device ${str} found`, 1);
 			break;
 		}
 		pairedport = npairedport;
@@ -372,6 +399,8 @@ function loadpairedports (verbose=true) {
 			connbutton.disabled = true;
 			connbutton.innerHTML = 'connect';
 		}
+	}).catch((e) => {
+		llog(`Error listing ports: ${e.message}`, 3);
 	});
 }
 
@@ -387,12 +416,18 @@ function edgetx_popupConfirmation (title, message, event) {
 }
 
 function elrsrun (key = 0) {
+	if (elrs == null || typeof elrs.run !== 'function') return;
 	popup_status.visible = false;
-	if (elrs.run(key) != 0) {
-		llog('ELRS Lua exited!');
-		crossfireFlush();
-		elrsrefresh(true);
-		elrs = null;
+	try {
+		if (elrs.run(key) != 0) {
+			llog('ELRS Lua exited!', 1);
+			crossfireFlush();
+			elrsrefresh(true);
+			elrs = null;
+			return;
+		}
+	} catch (e) {
+		showLuaError(e.message);
 		return;
 	}
 	ret = multiret('crossfireTelemetryPush');
@@ -400,8 +435,38 @@ function elrsrun (key = 0) {
 		comworker.postMessage(['crsfsend', ret[1], ret[2]]);
 	}
 	if (popup_status.visible) {
-		llog(`popup ${popup_status.title}: ${popup_status.message}`);
+		llog(`popup ${popup_status.title}: ${popup_status.message}`, 1);
 	}
+}
+
+function showLuaError(msg) {
+	llog('LUA ERROR: ' + msg, 3);
+	elrsrefresh(true);
+	elrs = null;
+	
+	// Draw error on LCD
+	lcd.clear();
+	lcd.ctx.fillStyle = '#ff0000';
+	lcd.ctx.font = 'bold 24px monospace';
+	lcd.ctx.fillText('LUA ERROR', 10, 40);
+	lcd.ctx.fillStyle = '#ffffff';
+	lcd.ctx.font = '14px monospace';
+	
+	// Simple text wrapping for the error message
+	const words = msg.split(' ');
+	let line = '';
+	let y = 70;
+	for (let n = 0; n < words.length; n++) {
+		let testLine = line + words[n] + ' ';
+		if (testLine.length > 50) {
+			lcd.ctx.fillText(line, 10, y);
+			line = words[n] + ' ';
+			y += 20;
+		} else {
+			line = testLine;
+		}
+	}
+	lcd.ctx.fillText(line, 10, y);
 }
 
 function elrsrefresh (clear=false) {
@@ -420,6 +485,11 @@ async function boot () {
 	const lua = await wasmoon.factory.createEngine();
 	window.lua = lua;
 	lua.global.set('getTime', get_uptime);
+	
+	// Map Lua print to our llog with level support. 
+	// Lua draw calls often use print, so they default to DEBUG (0).
+	lua.global.set('print', (msg) => llog(msg, 0));
+
 	const selector = 'script[type^="application/lua"], script[type^="text/lua"]';
 	Array.prototype.forEach.call(document.querySelectorAll(selector), try_tag);
 	if (elrs_load === true) {
@@ -433,9 +503,15 @@ async function boot () {
 	multiret = lua.global.get('multiret');
 	const logelem = document.getElementById("log");
 	if (logelem) {
-		llog = function (msg) {
+		llog = function (msg, level = 1) {
+			const currentLevel = parseInt(document.getElementById('log-level').value);
+			if (level < currentLevel) return;
 			const tm = get_uptime();
 			logelem.append(`${tm} ${msg}\n`);
+			// Auto scroll to bottom
+			if (logelem.parentElement) {
+				logelem.parentElement.scrollTop = logelem.parentElement.scrollHeight;
+			}
 		}
 	}
 	loadpairedports();
@@ -450,7 +526,35 @@ async function boot () {
 	lcd.BLACK = lua.global.get('BLACK');
 	lcd.WHITE = lua.global.get('WHITE');
 	lcd.CUSTOM_COLOR = lua.global.get('CUSTOM_COLOR');
-	lua.global.set('lcd', lcd);
+	
+	// Map JS functions to the Lua 'lcd' table individually.
+	// This preserves the Lua table structure and allows native Lua wrappers.
+	lua.global.set('jsLcd', lcd);
+	await window.lua.doString(`
+		lcd = lcd or {}
+		lcd.clear = function(...) return jsLcd.clear(...) end
+		lcd.drawLine = function(...) return jsLcd.drawLine(...) end
+		lcd.drawGauge = function(...) return jsLcd.drawGauge(...) end
+		lcd.drawRectangle = function(...) return jsLcd.drawRectangle(...) end
+		lcd.drawFilledRectangle = function(...) return jsLcd.drawFilledRectangle(...) end
+		lcd.drawText = function(...) return jsLcd.drawText(...) end
+		lcd.setColor = function(...) return jsLcd.setColor(...) end
+		lcd.RGB = function(...) return jsLcd.RGB(...) end
+		lcd.getLastPos = function(...) return jsLcd.getLastPos(...) end
+		
+		-- Native Lua wrapper for sizeText to correctly return multiple values.
+		-- Wasmoon proxies JS arrays as objects where indices start at 0.
+		lcd.sizeText = function(...)
+			local res = jsLcd.sizeText(...)
+			if res then
+				local w = tonumber(res[0]) or tonumber(res[1]) or 0
+				local h = tonumber(res[1]) or tonumber(res[2]) or 22
+				return w, h
+			end
+			return 0, 22
+		end
+	`);
+
 	lua.global.set('popupConfirmation', edgetx_popupConfirmation);
 	let key = lua.global.get('EVT_VIRTUAL_ENTER');
 	keymap[13] = key; // Enter
@@ -483,6 +587,79 @@ connbutton = document.getElementById('connect');
 pairbutton = document.getElementById('pair');
 startbutton = document.getElementById('start');
 statusspan = document.getElementById('crsfstatus');
+uploadbtn = document.getElementById('upload-btn');
+fileupload = document.getElementById('lua-upload');
+filename_display = document.getElementById('lua-filename');
+download_link = document.getElementById('download-link');
+
+uploadbtn.addEventListener('click', () => fileupload.click());
+fileupload.addEventListener('change', async (ev) => {
+	const file = ev.target.files[0];
+	if (!file) return;
+	
+	llog(`Loading ${file.name}...`, 1);
+	const text = await file.text();
+	
+	// Show last 5 lines to verify content
+	const lines = text.trim().split('\n');
+	const lastLines = lines.slice(-5);
+	llog('--- Last 5 lines ---', 1);
+	lastLines.forEach(l => llog('> ' + l, 1));
+	llog('-------------------', 1);
+
+	const uint8 = new TextEncoder().encode(text);
+	
+	// Use a unique filename in the virtual FS to force a fresh load
+	const vFilename = `upload_${Date.now()}.lua`;
+	await wasmoon.factory.mountFile(vFilename, uint8);
+	
+	filename_display.innerText = file.name;
+	
+	const blob = new Blob([text], { type: 'text/x-lua' });
+	const url = URL.createObjectURL(blob);
+	download_link.href = url;
+	download_link.download = file.name;
+
+	// Reset state and clear canvas
+	if (elrs != null) {
+		elrsrefresh(true);
+		elrs = null;
+	}
+	crossfireFlush();
+	lcd.clear(); // Clear the LCD so we don't see old frames
+
+	try {
+		// Pass the unique filename to the loader
+		const elrs_loader_factory = await window.lua.doString(`return loadelrs("${vFilename}")`);
+		if (typeof elrs_loader_factory !== 'function') {
+			throw new Error('Script did not return a valid loader function');
+		}
+		
+		elrs = elrs_loader_factory();
+		if (!elrs) {
+			throw new Error('Script returned nil');
+		}
+		
+		// Detailed check of required functions
+		const hasInit = typeof elrs.init === 'function';
+		const hasRun = typeof elrs.run === 'function';
+		
+		if (!hasInit || !hasRun) {
+			let missing = [];
+			if (!hasInit) missing.push('init()');
+			if (!hasRun) missing.push('run()');
+			throw new Error(`Script is missing ${missing.join(' and ')} function(s)`);
+		}
+
+		llog(`Initializing ${file.name}...`, 1);
+		elrs.init();
+		elrsrefresh();
+		llog(`${file.name} started successfully`, 1);
+	} catch (e) {
+		showLuaError(e.message);
+		console.error('Lua Load Error:', e);
+	}
+});
 popup_status = {
 	'title': null,
 	'message': null,
@@ -529,10 +706,10 @@ const status = {
 		} else {
 			this.bootiters++;
 			if (this.bootiters > 3) {
-				llog('Unresponsive CRSF, disconnecting...');
+				llog('Unresponsive CRSF, disconnecting...', 2);
 				comworker.postMessage(["stop"]);
 			} else if (this.bootiters > 1) {
-				llog('No CRSF response in >5 seconds');
+				llog('No CRSF response in >5 seconds', 2);
 			}
 		}
 		return this.update_main();
@@ -556,16 +733,18 @@ status.reset();
 
 const workermsg = {
 	'started': function (data) {
-		llog("serial worker started");
+		llog("serial worker started", 1);
 		connbutton.innerHTML = 'disconnect';
 		baudselect.disabled = true;
+		document.getElementById('lua-version').innerText = 'connecting...';
 		status.start();
 	},
 	'stopped': function (data) {
-		llog("serial worker stopped");
+		llog("serial worker stopped", 1);
 		connbutton.innerHTML = 'connect';
 		startbutton.disabled = true;
 		baudselect.disabled = false;
+		document.getElementById('lua-version').innerText = '-- (no connection)';
 		crossfireFlush();
 		status.reset();
 		elrsrefresh(true);
@@ -575,7 +754,7 @@ const workermsg = {
 		comworker.postMessage(data);
 	},
 	'log': function (data) {
-		llog(data[1]);
+		llog(data[1], data[2]);
 	},
 	'sync': function (data) {
 		var quickupd = false;
@@ -587,7 +766,7 @@ const workermsg = {
 		if (quickupd) status.update();
 	},
 	'start': function (data) {
-		llog('starting ELRS');
+		llog('starting ELRS', 1);
 		elrs = elrs_load();
 		elrs.init();
 		elrsrefresh();
@@ -597,6 +776,11 @@ const workermsg = {
 		var cmd = data[1];
 		var d = data[2];
 		crossfirePop(cmd, d);
+	},
+	'devinfo': function (data) {
+		const name = data[1];
+		const ver = `${data[2]}.${data[3]}.${data[4]}`;
+		document.getElementById('lua-version').innerText = `${name} (v${ver})`;
 	}
 };
 
@@ -627,33 +811,44 @@ document.querySelector('script[src="elrsV3.lua"]').addEventListener(
 	}
 );
 
-navigator.serial.addEventListener("connect", (e) => {
+navigator.serial?.addEventListener("connect", (e) => {
 	const info = e.target.getInfo();
 	const str = portstr(info);
-	llog(`paired device ${str} attached`);
+	llog(`paired device ${str} attached`, 1);
 	loadpairedports(false);
 });
-navigator.serial.addEventListener("disconnect", (e) => {
+navigator.serial?.addEventListener("disconnect", (e) => {
 	const info = e.target.getInfo();
 	const str = portstr(info);
-	llog(`paired device ${str} detached`);
+	llog(`paired device ${str} detached`, 1);
 	loadpairedports(false);
 });
 
 pairbutton.addEventListener("click", () => {
+	if (navigator.serial === undefined) {
+		llog('Browser does not support Web Serial API. Pairing unavailable.', 3);
+		return;
+	}
 	if (pairedport != null) {
 		pairedport.port.forget().then(() => {
-			llog(`device ${pairedport.info} unpaired`);
+			llog(`device ${pairedport.info} unpaired`, 1);
 			loadpairedports();
+		}).catch((e) => {
+			llog(`Error unpairing: ${e.message}`, 3);
 		});
 	} else {
+		llog('Requesting device pair...', 1);
 		navigator.serial.requestPort().then((port) => {
 			const info = port.getInfo();
 			const str = portstr(info);
-			llog(`device ${str} paired`);
+			llog(`device ${str} paired`, 1);
 			loadpairedports(false);
 		}).catch((e) => {
-			if (e.name == 'NotFoundError') return;
+			if (e.name == 'NotFoundError') {
+				llog('Pairing cancelled by user', 1);
+				return;
+			}
+			llog(`Error pairing: ${e.message}`, 3);
 			throw(e);
 		});
 	}
@@ -670,7 +865,7 @@ connbutton.addEventListener("click", () => {
 });
 
 startbutton.addEventListener('click', () => {
-	llog('(re)starting ELRS');
+	llog('(re)starting ELRS', 1);
 	if (elrs != null) {
 		crossfireFlush();
 		elrsrefresh(true);
